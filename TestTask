@@ -15,7 +15,6 @@ namespace FiguresDotStore.Controllers
 	
 	public static class FiguresStorage
 	{
-		// корректно сконфигурированный и готовый к использованию клиент Редиса
 		private static IRedisClient RedisClient { get; }
 	
 		public static bool CheckIfAvailable(string type, int count)
@@ -47,77 +46,96 @@ namespace FiguresDotStore.Controllers
 		public List<Position> Positions { get; set; }
 	}
 
-	public class Order
-	{
-		public List<Figure> Positions { get; set; }
+    public class Order
+    {
+        public List<IFigure> Positions { get; set; }
 
-		public decimal GetTotal() =>
-			Positions.Select(p => p switch
-				{
-					Triangle => (decimal) p.GetArea() * 1.2m,
-					Circle => (decimal) p.GetArea() * 0.9m
-				})
-				.Sum();
+        public decimal GetTotal() => Positions.Select(p => p switch
+            {
+                Triangle _ => (decimal) p.GetArea() * 1.2m,
+                Circle _ => (decimal) p.GetArea() * 0.9m,
+                //Square _ => (decimal)p.GetArea() ?
+            })
+            .Sum();
+    }
+
+    public interface IFigure
+	{
+        void Validate();
+		double GetArea();
 	}
 
-	public abstract class Figure
+	public class Triangle : IFigure
 	{
-		public float SideA { get; set; }
-		public float SideB { get; set; }
-		public float SideC { get; set; }
+		public float[] Dimentions { get; set; }
+		private float? _perimeter;
 
-		public abstract void Validate();
-		public abstract double GetArea();
-	}
-
-	public class Triangle : Figure
-	{
-		public override void Validate()
+        public Triangle(float sideA, float sideB, float sideC)
+        {
+            Dimentions = new[] {sideA, sideB, sideC};
+        }
+		private float Perimeter
 		{
-			bool CheckTriangleInequality(float a, float b, float c) => a < b + c;
-			if (CheckTriangleInequality(SideA, SideB, SideC)
-			    && CheckTriangleInequality(SideB, SideA, SideC)
-			    && CheckTriangleInequality(SideC, SideB, SideA)) 
-				return;
-			throw new InvalidOperationException("Triangle restrictions not met");
+			get => _perimeter ?? Dimentions.Sum();
+			set => _perimeter = value;
 		}
 
-		public override double GetArea()
+        public void Validate()
 		{
-			var p = (SideA + SideB + SideC) / 2;
-			return Math.Sqrt(p * (p - SideA) * (p - SideB) * (p - SideC));
+			if (Dimentions.Length != 3 ||
+				Dimentions.Any(x => x < 0) ||
+				Dimentions.Any(x => x >= Perimeter - x))
+			{
+				throw new InvalidOperationException("Triangle restrictions not met");
+			}
+        }
+
+		public double GetArea()
+		{
+			var p = Perimeter / 2;
+			return Math.Sqrt(p * (p - Dimentions[0]) * (p - Dimentions[1]) * (p - Dimentions[2]));
 		}
-		
 	}
 	
-	public class Square : Figure
+	public class Square : IFigure
 	{
-		public override void Validate()
+		public float[] Dimentions { get; set; }
+
+        public Square(float sideA, float sideB)
+        {
+            Dimentions = new[] {sideA, sideB};
+        }
+
+		public void Validate()
 		{
-			if (SideA < 0)
-				throw new InvalidOperationException("Square restrictions not met");
-			
-			if (SideA != SideB)
+			if (Dimentions.Any(x => x < 0) ||
+				Dimentions.Any(x => x != Dimentions.First()))
 				throw new InvalidOperationException("Square restrictions not met");
 		}
 
-		public override double GetArea() => SideA * SideA;
+		public double GetArea() => Dimentions.First() * Dimentions.First();
 	}
 	
-	public class Circle : Figure
+	public class Circle : IFigure
 	{
-		public override void Validate()
+		public float[] Dimentions { get; set; }
+
+        public Circle(float radius)
+        {
+            Dimentions = new[] { radius };
+        }
+
+		public void Validate()
 		{
-			if (SideA < 0)
+			if (Dimentions.First() < 0)
 				throw new InvalidOperationException("Circle restrictions not met");
 		}
 
-		public override double GetArea() => Math.PI * SideA * SideA;
+		public double GetArea() => Math.PI * Dimentions.First() * Dimentions.First();
 	}
 
 	public interface IOrderStorage
 	{
-		// сохраняет оформленный заказ и возвращает сумму
 		Task<decimal> Save(Order order);
 	}
 	
@@ -134,44 +152,38 @@ namespace FiguresDotStore.Controllers
 			_orderStorage = orderStorage;
 		}
 
-		// хотим оформить заказ и получить в ответе его стоимость
 		[HttpPost]
 		public async Task<ActionResult> Order(Cart cart)
 		{
-			foreach (var position in cart.Positions)
-			{
-				if (!FiguresStorage.CheckIfAvailable(position.Type, position.Count))
-				{
-					return new BadRequestResult();
-				}
-			}
+			if (cart == null) return new BadRequestResult();
+			if (cart.Positions.Any(p => !FiguresStorage.CheckIfAvailable(p.Type, p.Count)))
+				return new BadRequestResult();
 
-			var order = new Order
-			{
-				Positions = cart.Positions.Select(p =>
-				{
-					Figure figure = p.Type switch
-					{
-						"Circle" => new Circle(),
-						"Triangle" => new Triangle(),
-						"Square" => new Square()
-					};
-					figure.SideA = p.SideA;
-					figure.SideB = p.SideB;
-					figure.SideC = p.SideC;
-					figure.Validate();
-					return figure;
-				}).ToList()
-			};
-
-			foreach (var position in cart.Positions)
-			{
-				FiguresStorage.Reserve(position.Type, position.Count);
-			}
-
+			var order = BuildOrderFromCart(cart);
+			cart.Positions.ForEach(p => FiguresStorage.Reserve(p.Type, p.Count));
 			var result = _orderStorage.Save(order);
 
 			return new OkObjectResult(result.Result);
+		}
+
+		private Order BuildOrderFromCart(Cart cart)
+		{
+			var positions = cart.Positions.Select(p =>
+			{
+				IFigure figure = p.Type
+                switch
+                {
+                    "Circle" => new Circle(p.SideA),
+                    "Triangle" => new Triangle(p.SideA, p.SideB, p.SideC),
+                    "Square" => new Square(p.SideA, p.SideB),
+                    _ => throw new NotImplementedException()
+                };
+
+				figure.Validate();
+				return figure;
+			}).ToList();
+
+			return new Order { Positions = positions };
 		}
 	}
 }
